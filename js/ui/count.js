@@ -4,7 +4,7 @@ import { partById, sortedParts, photoById, photoSummary, tally, counts, diff, lo
 import { esc, pn, toast, confirmBox, promptBox, pickFiles, uid, clamp, PALETTE, inkOn, fmtN, when, openModal, closeModal } from '../util.js';
 import { thumbHTML, warmThumbs, pickPart, codeTag } from './common.js';
 import { openPartEditor, autoCode } from './part.js';
-import { decode, analyzeCanvas, canvasFromRGBA, toJpeg, thumbOf, call, pixels } from '../vision/client.js';
+import { decode, analyzeCanvas, canvasFromRGBA, toJpeg, thumbOf, call, pixels, stopEngine } from '../vision/client.js';
 import { refsFor, ensureSilhouettes, estimateScale, classify, group, similarTo, learn, feat, compact, letters } from '../vision/match.js';
 import { openMatDialog } from '../vision/mat.js';
 import { go, projPath } from '../main.js';
@@ -47,7 +47,7 @@ export async function mount(el, route, ctx) {
       <div class="card pad" style="display:grid;gap:14px;justify-items:center;text-align:center;border-style:dashed">
         <b style="font-size:17px">Add a photo</b><span class="muted small">Drop it here, choose a file, or take one with your phone or tablet.</span>
         <div class="btnrow" style="justify-content:center"><button type="button" class="btn primary" id="choose">Choose a photo</button><button type="button" class="btn" id="take">Take a photo</button></div>
-        <div id="prog" hidden style="width:min(420px,100%);display:grid;gap:6px"><div class="progress"><i id="progBar"></i></div><span class="small muted" id="progTxt"></span></div>
+        <div id="prog" hidden style="width:min(420px,100%);display:grid;gap:6px"><div class="row" style="flex-wrap:nowrap;gap:10px"><div class="progress" style="flex:1"><i id="progBar"></i></div><button type="button" class="btn small" id="progStop">Stop</button></div><span class="small muted" id="progTxt"></span></div>
       </div>
       <details class="card pad"><summary><b>Detection settings</b> <span class="small muted">· for tricky photos</span></summary>
         <div style="display:grid;gap:14px;margin-top:12px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
@@ -72,18 +72,20 @@ export async function mount(el, route, ctx) {
     el.querySelector('#sMin').oninput = (e) => { el.querySelector('#sMinV').textContent = e.target.value; }; el.querySelector('#sMin').onchange = (e) => saveSet('minMM', +e.target.value);
     el.querySelector('#sDetail').onchange = (e) => saveSet('detail', e.target.value);
     el.querySelector('#sSplit').onchange = (e) => saveSet('split', e.target.checked);
-    progress = (f, t) => { const box = el.querySelector('#prog'); if (!box) return; box.hidden = false; el.querySelector('#progBar').style.width = Math.round(f * 100) + '%'; el.querySelector('#progTxt').textContent = t || ''; };
+    el.querySelector('#progStop').onclick = (e) => { S.stop = true; e.target.disabled = true; e.target.textContent = 'Stopping…'; stopEngine(); };
+    progress = (f, t) => { const box = el.querySelector('#prog'); if (!box) return; if (f === 0 && !t) { box.hidden = true; const b = el.querySelector('#progStop'); b.disabled = false; b.textContent = 'Stop'; return; } box.hidden = false; el.querySelector('#progBar').style.width = Math.round(f * 100) + '%'; el.querySelector('#progTxt').textContent = t || ''; };
   }
 
   /* ================= processing a new photo ================= */
   async function startPhoto(file) {
     const p = store.project(); const st = settings(); const mode = S.mode;
     const pr = (f, t) => progress && progress(f, t);
+    S.stop = false; const check = () => { if (S.stop) throw Object.assign(new Error('Stopped'), { stopped: true }); };
     try {
       pr(0.02, 'Opening the photo');
       if (mode === 'labels') {
         // labels are read at full detail later (on the labels page); just keep the photo sharp
-        const { canvas: lc } = await decode(file, 16e6, 6000);
+        const { canvas: lc } = await decode(file, 16e6, 6000); check();
         const id = uid('ph_'); const f2 = `photos/${id}.jpg`, th = `photos/${id}_t.jpg`;
         await store.putFile(f2, await toJpeg(lc, 0.92)); await store.putFile(th, await thumbOf(lc));
         store.change((q) => { q.photos.push({ id, name: `Photo ${p.photos.length + 1}`, file: f2, thumb: th, W: lc.width, H: lc.height, mode, status: 'draft', at: Date.now(), items: [], pkgs: null }); });
@@ -91,9 +93,10 @@ export async function mount(el, route, ctx) {
       }
       const maxPx = st.detail === 'high' ? 12e6 : 7e6;
       let { canvas } = await decode(file, maxPx, st.detail === 'high' ? 5200 : 4200);
-      if (mode !== 'labels' && p.parts.some((t) => t.model && !t.model.sil)) await ensureSilhouettes((f, t) => pr(0.03 + f * 0.1, t));
+      if (mode !== 'labels' && p.parts.some((t) => t.model && !t.model.sil)) await ensureSilhouettes((f, t) => pr(0.03 + f * 0.1, t)); check();
       const opts = mode === 'labels' ? { mode: 'labels', split: false, shadow: st.shadow, minMM: 25, minArea: Math.round(canvas.width * canvas.height * 0.0015) } : { mode, shadow: st.shadow, minMM: st.minMM, split: st.split };
-      const res = await analyzeCanvas(canvas, opts, (f, t) => pr(0.15 + f * 0.7, t));
+      check();
+      const res = await analyzeCanvas(canvas, opts, (f, t) => pr(0.15 + f * 0.7, t)); check();
       if (res.rgba) canvas = canvasFromRGBA(res.rgba, res.W, res.H);
       const id = uid('ph_'); const file2 = `photos/${id}.jpg`, thumb = `photos/${id}_t.jpg`;
       pr(0.9, 'Saving the photo');
@@ -107,10 +110,11 @@ export async function mount(el, route, ctx) {
       ph.items = res.objs.map((o, k) => ({ id: 'i' + k, x: +o.x.toFixed(1), y: +o.y.toFixed(1), poly: thin(o.poly), box: o.box, f: compact(o), edge: o.edge || undefined }));
       // a photo of labelled packages? offer to read the labels instead
       try { const px = pixels(canvas); const fl = await call('findLabels', { rgba: px.data.buffer, W: px.width, H: px.height, opts: {} }, [px.data.buffer]); if (fl.labels.length >= 4) ph.labelHint = fl.labels.length; } catch (e) {}
+      check();
       if (mode === 'parts') matchPhoto(p, ph); else ph.items.forEach((it) => { it.st = 'unknown'; it.part = null; });
       store.change((q) => { q.photos.push(ph); });
       go(projPath('count', id));
-    } catch (e) { console.error(e); toast('Couldn’t read that photo: ' + esc(e.message || e)); pr(0, ''); }
+    } catch (e) { if (e && e.stopped) toast('Stopped. Nothing was saved from that photo.'); else { console.error(e); toast('Couldn’t read that photo: ' + esc(e.message || e)); } pr(0, ''); }
   }
   const thin = (poly) => { if (!poly) return null; const n = poly.length / 2; if (n <= 48) return poly; const out = []; for (let k = 0; k < 48; k++) { const i = Math.floor((k * n) / 48); out.push(poly[i * 2], poly[i * 2 + 1]); } return out; };
 

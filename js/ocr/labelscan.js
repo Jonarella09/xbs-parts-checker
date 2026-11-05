@@ -121,7 +121,7 @@ function charProbs(r, m) {
 export async function scanLabels(canvas, opts = {}) {
   const { onProgress, known = [] } = opts; const say = (f, t) => onProgress && onProgress(f, t);
   const W = canvas.width, H = canvas.height;
-  await pp.load((f, t) => say(0.04 + f * 0.12, t));
+  await pp.load((f, t) => say(0.03 + f * 0.17, t));
   // 1. regions to read: every white label rectangle, a bit bigger so cut-off labels are read whole
   const regions = (opts.whiteLabels || []).map((r) => ({ src: 'label', b: rectOf(r, 1.22, 1.3) }));
   // 2. text the label finder missed (glare, coloured labels): a quick look for text over the whole photo
@@ -130,7 +130,7 @@ export async function scanLabels(canvas, opts = {}) {
     for (let y = 0; y < H; y += T - O) { for (let x = 0; x < W; x += T - O) { tiles.push([x, y, Math.min(T, W - x), Math.min(T, H - y)]); if (x + T >= W) break; } if (y + T >= H) break; }
     const stray = [];
     for (let i = 0; i < tiles.length; i++) {
-      say(0.16 + (0.14 * i) / tiles.length, `Looking for text the label finder missed (${i + 1} of ${tiles.length})`);
+      say(0.2 + (0.1 * i) / tiles.length, `Looking for text the label finder missed (${i + 1} of ${tiles.length})`);
       const bx = await pp.detect(canvas, tiles[i], { scale: sc, maxSide: 2000, boxThresh: 0.55 });
       for (const q of bx) { if (q.h < 4 || q.w < q.h * 2.5) continue; if (regions.some((r) => q.cx > r.b[0] && q.cx < r.b[2] && q.cy > r.b[1] && q.cy < r.b[3])) continue; stray.push(q); }
     }

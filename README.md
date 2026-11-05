@@ -4,7 +4,7 @@ Count and index parts: screws, robot parts, field elements, 3D-printed kits. Eve
 
 **Open it:** https://jonarella09.github.io/xbs-parts-checker/
 
-Version 2.1 "Polaris" (phase 2 of the roadmap below).
+Version 2.1.1 "Polaris" (phase 2 of the roadmap below).
 
 ## What it does
 

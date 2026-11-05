@@ -13,6 +13,12 @@ function worker() {
   w.onerror = (e) => { for (const p of pend.values()) p.rej(new Error(e.message || 'The photo engine stopped.')); pend.clear(); w = null; };
   return w;
 }
+/** Stop whatever the photo engine is doing (it restarts by itself on the next call). */
+export function stopEngine() {
+  if (w) { try { w.terminate(); } catch (e) {} w = null; }
+  for (const p of pend.values()) p.rej(Object.assign(new Error('Stopped'), { stopped: true }));
+  pend.clear();
+}
 export function call(cmd, data, transfer = [], onProgress) {
   return new Promise((res, rej) => { const id = ++seq; pend.set(id, { res, rej, onProgress }); worker().postMessage({ id, cmd, data }, transfer); });
 }

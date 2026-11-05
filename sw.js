@@ -1,5 +1,5 @@
 /* The Indexer service worker: works offline, keeps the app and its libraries cached. */
-const VERSION = '2.1.0-1793918556594';
+const VERSION = '2.1.1-1793920083947';
 const PRECACHE = ["./", "app.css", "icons/apple-touch-icon.png", "icons/favicon.svg", "icons/icon-192.png", "icons/icon-512.png", "icons/icon-maskable-512.png", "icons/star-file-256.png", "index.html", "js/db.js", "js/main.js", "js/ocr/labelscan.js", "js/ocr/ocr-worker.js", "js/ocr/ppocr.js", "js/ocr/scan.js", "js/plan.js", "js/proj.js", "js/star.js", "js/stl.js", "js/store.js", "js/ui/common.js", "js/ui/count.js", "js/ui/history.js", "js/ui/home.js", "js/ui/inventory.js", "js/ui/kits.js", "js/ui/labels.js", "js/ui/part.js", "js/ui/print.js", "js/util.js", "js/vision/client.js", "js/vision/mat.js", "js/vision/match.js", "js/vision/worker.js", "lib/aruco/LICENSE.txt", "lib/aruco/aruco.js", "lib/aruco/cv.js", "lib/barcode-detector.js", "lib/zxing_reader.wasm", "manifest.webmanifest"];
 const APP_CACHE = 'indexer-app-' + VERSION, LIB_CACHE = 'indexer-libs-v1';
 const LIB_HOSTS = ['cdn.jsdelivr.net', 'cdnjs.cloudflare.com', 'fonts.googleapis.com', 'fonts.gstatic.com'];

@@ -41,11 +41,67 @@ function groupsOf(ph) {
   return { groups, loose };
 }
 
+/* Reading jobs live outside the view: leaving the page and coming back doesn't start the reading over, and a
+   reading that fails or is stopped waits for the user (it never retries by itself). */
+const jobs = new Map(); // photo id → { st: 'run' | 'stop' | 'err', f, t, msg, r0, ac, subs }
+function startJob(phId, img) {
+  const old = jobs.get(phId); if (old && old.st === 'run') return old;
+  const pid = store.project().id;
+  const j = { st: 'run', f: 0, t: 'Starting', ac: new AbortController(), subs: new Set() };
+  jobs.set(phId, j);
+  const tell = (full) => { for (const fn of [...j.subs]) if (fn(full) === false) j.subs.delete(fn); };
+  (async () => {
+    try {
+      const known = store.project().parts.map((t) => t.partNo).filter(Boolean);
+      if (!img.naturalWidth) throw new Error('The photo couldn’t be opened.');
+      const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight; c.getContext('2d').drawImage(img, 0, 0);
+      const pk = await scanPhoto(c, { known, signal: j.ac.signal, onProgress: (f, t) => {
+        if (f >= 0.3 && !j.r0) j.r0 = { at: Date.now(), f }; // labels are being read: time the rest from here
+        j.f = Math.max(j.f, f); j.t = t; tell(false); } });
+      const p = store.project();
+      if (!p || p.id !== pid || !photoById(p, phId)) throw new Error('The project or the photo was closed before the labels were read.');
+      const keep = pk.map((k) => ({ box: k.box, partNo: k.partNo || '', name: fixWords(k.name || ''), qty: k.qty || null, qtyGuess: !!k.qtyGuess, text: k.text, conf: +(k.partConf || 0).toFixed(2), fixed: !!k.fixed, readAs: k.readAs || undefined }));
+      store.change((q) => { const P = photoById(q, phId); P.pkgs = keep; P.lgroups = {}; P.scannedAt = Date.now(); }, { quiet: true });
+      jobs.delete(phId); j.st = 'done';
+    } catch (e) {
+      if (e && e.stopped) j.st = 'stop'; else { console.error(e); j.st = 'err'; j.msg = (e && e.message) || String(e); }
+    }
+    tell(true);
+    if (!j.subs.size && j.st === 'err') toast('Couldn’t read the labels: ' + esc(j.msg));
+  })();
+  return j;
+}
+function timeLeft(j) {
+  if (!j.r0 || j.f < j.r0.f + 0.03) return '';
+  const el = (Date.now() - j.r0.at) / 1000; if (el < 5) return '';
+  const s = ((1 - j.f) * el) / (j.f - j.r0.f);
+  return s < 55 ? ` · about ${Math.max(5, Math.round(s / 5) * 5)} s left` : ` · about ${Math.round(s / 60)} min left`;
+}
+
 export async function labelsView(el, ph0) {
   const p0 = store.project(); await warmThumbs(p0);
   const url = await store.fileUrl(ph0.file); const img = new Image(); img.src = url; await img.decode().catch(() => {});
+  // draw into our own box, so a reading that finishes after you've left this page can tell it's gone
+  const host = el; el = document.createElement('div'); host.replaceChildren(el);
   const cur = () => photoById(store.project(), ph0.id);
-  let scanning = false, prog = { f: 0, t: '' };
+  const sub = (full) => {
+    if (!el.isConnected) return false;
+    if (full) { render(); return; }
+    const j = jobs.get(ph0.id); if (!j) return;
+    const b = el.querySelector('#ocrBar'), x = el.querySelector('#ocrTxt'), n = el.querySelector('#ocrPct');
+    if (b) b.style.width = Math.round(j.f * 100) + '%'; if (n) n.textContent = Math.round(j.f * 100) + '%'; if (x) x.textContent = j.t + timeLeft(j);
+  };
+  const discard = async (ph) => { if (!(await confirmBox({ title: 'Discard this photo?', text: 'Nothing from it was counted yet.', ok: 'Discard', danger: true }))) return; const j = jobs.get(ph.id); if (j) { j.ac.abort(); jobs.delete(ph.id); } await store.delFile(ph.file); if (ph.thumb) await store.delFile(ph.thumb); store.change((q) => { q.photos = q.photos.filter((x) => x.id !== ph.id); }); go(projPath('count')); };
+  function jobCard(ph) {
+    const j = jobs.get(ph.id); if (!j) return '';
+    if (j.st === 'run') { const pc = Math.round(j.f * 100);
+      return `<div class="card pad" style="display:grid;gap:8px"><div class="row" style="flex-wrap:nowrap;gap:10px"><div class="progress" style="flex:1"><i id="ocrBar" style="width:${pc}%"></i></div><b class="small num" id="ocrPct" style="min-width:3ch;text-align:right">${pc}%</b><button type="button" class="btn small" id="ocrStop">Stop</button></div>
+        <span class="small" id="ocrTxt">${esc(j.t + timeLeft(j))}</span>
+        <span class="tiny muted">A big table takes a minute or two. The first time, the text reader also downloads (about 30 MB); after that it works offline. You can leave this page; the reading carries on.</span></div>`; }
+    const btns = `<div class="btnrow" style="margin-top:8px"><button type="button" class="btn primary small" id="ocrGo">${j.st === 'stop' ? 'Read the labels' : 'Try again'}</button><button type="button" class="btn ghost small danger" id="ocrDiscard">Discard photo</button></div>`;
+    if (j.st === 'stop') return `<div class="note info"><b>Stopped.</b> Nothing was counted from this photo.${btns}</div>`;
+    return `<div class="note warn"><b>Couldn’t read the labels.</b> ${esc(j.msg)}${navigator.onLine ? '' : ' You seem to be offline; the text reader needs the internet the first time.'}${btns}</div>`;
+  }
   const setG = (key, patch) => store.change((q) => { const P = photoById(q, ph0.id); P.lgroups = P.lgroups || {}; P.lgroups[key] = Object.assign({}, P.lgroups[key] || {}, patch); }, { quiet: true });
 
   function partFor(p, g) {
@@ -54,15 +110,17 @@ export async function labelsView(el, ph0) {
   }
   const render = () => {
     const p = store.project(); const ph = cur(); if (!ph) return; const ro = ph.status !== 'draft';
+    if (!ph.pkgs && !ro && !jobs.has(ph.id)) startJob(ph.id, img);
+    const job = jobs.get(ph.id);
     const { groups, loose } = ph.pkgs ? groupsOf(ph) : { groups: [], loose: [] };
     const inc = groups.filter((g) => !g.skip);
     const pieces = inc.reduce((a, g) => a + g.packs * (g.qty || 1), 0);
     const colorOf = (key) => { const i = groups.findIndex((g) => g.key === key); return i < 0 ? '#ffbf2e' : ['#22c55e', '#3b82f6', '#f59e0b', '#ec4899', '#8b5cf6', '#14b8a6', '#ef4444', '#84cc16', '#06b6d4', '#f97316'][i % 10]; };
     el.innerHTML = `<div class="page">
       <div class="hero"><div><a class="small" href="#/${projPath('count')}">← Count</a><h1 style="margin-top:4px">${esc(ph.name)} · labels</h1>
-        <p class="sub">${ph.pkgs ? `${pn(ph.pkgs.length, 'label')} read: ${pn(groups.length, 'different part')}${loose.length ? `, ${loose.length} without a readable part number` : ''}. Packages with the same part number are counted together.` : 'Reading every label in the photo. This takes a minute or two for a big table.'}</p></div>
+        <p class="sub">${ph.pkgs ? `${pn(ph.pkgs.length, 'label')} read: ${pn(groups.length, 'different part')}${loose.length ? `, ${loose.length} without a readable part number` : ''}. Packages with the same part number are counted together.` : job && job.st !== 'run' ? 'The labels haven’t been read yet.' : 'Reading every label in the photo.'}</p></div>
         <div class="btnrow">${ph.status === 'added' ? '<span class="tag ok">Counted</span>' : ph.status === 'archived' ? '<span class="tag">Archived</span>' : ''}${ph.pkgs && !ro ? '<button type="button" class="btn ghost small" id="rescan">Read again</button>' : ''}</div></div>
-      ${!ph.pkgs ? `<div class="card pad" style="display:grid;gap:8px"><div class="progress"><i id="ocrBar" style="width:${Math.round(prog.f * 100)}%"></i></div><span class="small muted" id="ocrTxt">${esc(prog.t || 'Starting…')}</span><span class="tiny muted">The first time, the text reader downloads (about 30 MB). After that it works offline.</span></div>` : ''}
+      ${!ph.pkgs ? jobCard(ph) : ''}
       <div class="card pad" style="display:grid;gap:10px"><div style="position:relative;max-height:52vh;overflow:auto;border-radius:10px;background:#1a1f26"><div style="position:relative;width:100%"><img src="${url}" alt="" style="width:100%;display:block">
         <svg viewBox="0 0 ${ph.W} ${ph.H}" style="position:absolute;inset:0;width:100%;height:100%">${(ph.pkgs || []).map((k, i) => { const [x0, y0, x1, y1] = k.box; const col = k.partNo ? colorOf(norm(k.partNo)) : '#ff4d4d'; const sw = Math.max(3, ph.W / 500);
           return `<rect data-k="${i}" style="cursor:pointer;pointer-events:all" x="${x0}" y="${y0}" width="${x1 - x0}" height="${y1 - y0}" fill="transparent" stroke="${col}" stroke-width="${sw}" ${k.partNo ? '' : `stroke-dasharray="${sw * 3} ${sw * 2}"`}/><text x="${x0 + sw * 2}" y="${y0 + Math.max(24, ph.W / 70)}" font-size="${Math.max(22, ph.W / 75)}" fill="#fff" stroke="#000" stroke-width="${sw * 0.8}" paint-order="stroke" font-weight="700">${i + 1}</text>`; }).join('')}</svg></div></div></div>
@@ -73,7 +131,10 @@ export async function labelsView(el, ph0) {
       ${ph.pkgs && !ph.pkgs.length ? '<div class="empty"><p>No labels were found. Lay the packages flat, label up, with light on them and no strong glare, and try again.</p></div>' : ''}
     </div>`;
     wire(p, ph, ro, groups);
-    if (!ph.pkgs && !scanning) scan();
+    if (job) job.subs.add(sub);
+    const st = el.querySelector('#ocrStop'); if (st) st.onclick = () => { st.disabled = true; st.textContent = 'Stopping…'; job.ac.abort(); };
+    const og = el.querySelector('#ocrGo'); if (og) og.onclick = () => { jobs.delete(ph.id); render(); };
+    const od = el.querySelector('#ocrDiscard'); if (od) od.onclick = () => discard(ph);
   };
   function groupHTML(p, g, ro, col) {
     const t = partFor(p, g);
@@ -98,7 +159,7 @@ export async function labelsView(el, ph0) {
     el.querySelectorAll('[data-crop]').forEach((c) => { const k = ph.pkgs[+c.dataset.crop]; if (!k) return; const cc = cropLabel(img, k, c.closest('.pimg') ? 150 : 120); c.width = cc.width; c.height = cc.height; c.getContext('2d').drawImage(cc, 0, 0); });
     el.querySelectorAll('[data-k]').forEach((r) => (r.onclick = () => { const k = ph.pkgs[+r.dataset.k]; const t = el.querySelector(k.partNo ? `#g-${CSS.escape(norm(k.partNo))}` : `#l-${r.dataset.k}`); if (t) { t.scrollIntoView({ behavior: 'smooth', block: 'center' }); t.animate([{ boxShadow: '0 0 0 4px var(--star)' }, { boxShadow: '0 0 0 0 transparent' }], { duration: 1400 }); } }));
     if (ro) return;
-    const rs = el.querySelector('#rescan'); if (rs) rs.onclick = async () => { if (!(await confirmBox({ title: 'Read the labels again?', text: 'Your changes to names, numbers and quantities on this photo are lost.', ok: 'Read again' }))) return; store.change((q) => { const P = photoById(q, ph0.id); P.pkgs = null; P.lgroups = {}; }, { quiet: true }); render(); };
+    const rs = el.querySelector('#rescan'); if (rs) rs.onclick = async () => { if (!(await confirmBox({ title: 'Read the labels again?', text: 'Your changes to names, numbers and quantities on this photo are lost.', ok: 'Read again' }))) return; store.change((q) => { const P = photoById(q, ph0.id); P.pkgs = null; P.lgroups = {}; }, { quiet: true }); jobs.delete(ph0.id); render(); };
     el.querySelectorAll('[data-skip]').forEach((b) => (b.onchange = () => { setG(b.dataset.skip, { skip: !b.checked }); render(); }));
     el.querySelectorAll('[data-g]').forEach((inp) => (inp.onchange = () => {
       const key = inp.dataset.g, f = inp.dataset.f;
@@ -110,18 +171,7 @@ export async function labelsView(el, ph0) {
     el.querySelectorAll('[data-loose]').forEach((inp) => (inp.onchange = () => { const v = inp.value.trim(); if (!v) return; store.change((q) => { photoById(q, ph0.id).pkgs[+inp.dataset.loose].partNo = v; }, { quiet: true }); render(); }));
     el.querySelectorAll('[data-pick]').forEach((b) => (b.onclick = async () => { const key = b.dataset.pick; const r = await pickPart(store.project(), { title: 'Which part are these packages?', allowNew: true }); if (!r) return; setG(key, { part: r === '__new' ? 'new' : r }); render(); }));
     const add = el.querySelector('#lAdd'); if (add) add.onclick = () => addAll(groups);
-    const dis = el.querySelector('#lDiscard'); if (dis) dis.onclick = async () => { if (!(await confirmBox({ title: 'Discard this photo?', text: 'Nothing from it was counted yet.', ok: 'Discard', danger: true }))) return; await store.delFile(ph.file); if (ph.thumb) await store.delFile(ph.thumb); store.change((q) => { q.photos = q.photos.filter((x) => x.id !== ph.id); }); go(projPath('count')); };
-  }
-  async function scan() {
-    scanning = true;
-    try {
-      const known = store.project().parts.map((t) => t.partNo).filter(Boolean);
-      const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight; c.getContext('2d').drawImage(img, 0, 0);
-      const pk = await scanPhoto(c, { known, onProgress: (f, t) => { prog = { f, t }; const b = el.querySelector('#ocrBar'), x = el.querySelector('#ocrTxt'); if (b) b.style.width = Math.round(f * 100) + '%'; if (x) x.textContent = t; } });
-      const keep = pk.map((k) => ({ box: k.box, partNo: k.partNo || '', name: fixWords(k.name || ''), qty: k.qty || null, qtyGuess: !!k.qtyGuess, text: k.text, conf: +(k.partConf || 0).toFixed(2), fixed: !!k.fixed, readAs: k.readAs || undefined }));
-      store.change((q) => { const P = photoById(q, ph0.id); P.pkgs = keep; P.lgroups = {}; P.scannedAt = Date.now(); }, { quiet: true });
-    } catch (e) { console.error(e); toast('Couldn’t read the labels: ' + esc(e.message || e) + (navigator.onLine ? '' : ' (the text reader needs the internet the first time)')); prog = { f: 0, t: 'Stopped: ' + (e.message || e) }; }
-    scanning = false; render();
+    const dis = el.querySelector('#lDiscard'); if (dis) dis.onclick = () => discard(ph);
   }
   async function addAll(groups) {
     const p = store.project(); const inc = groups.filter((g) => !g.skip);

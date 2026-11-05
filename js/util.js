@@ -1,5 +1,5 @@
 // Small shared helpers: DOM, text, ids, toast, modals, downloads, script loading.
-export const APP = { name: 'The Indexer', version: '2.1', codename: 'Polaris' };
+export const APP = { name: 'The Indexer', version: '2.1.1', codename: 'Polaris' };
 
 export const $ = (id) => document.getElementById(id);
 export const qs = (sel, root = document) => root.querySelector(sel);

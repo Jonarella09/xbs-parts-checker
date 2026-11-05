@@ -1,41 +1,56 @@
 // PaddleOCR (PP-OCRv4) running in the browser with ONNX Runtime Web: a text detector (DBNet) that finds
 // lines of text, and a recogniser (SVTR + CTC) that reads them. Much better than Tesseract on small,
-// blurry text like package labels in a photo. Models download once (about 16 MB) and are cached.
+// blurry text like package labels in a photo. The engine and models download once (about 30 MB) and are cached.
+const ORT = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/';
+const MODELS = 'https://cdn.jsdelivr.net/npm/@gutenye/ocr-models@1.4.2/assets/';
 export const PP = {
-  ort: 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/ort.min.mjs',
-  wasm: 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/',
-  det: 'https://cdn.jsdelivr.net/npm/@gutenye/ocr-models@1.4.2/assets/ch_PP-OCRv4_det_infer.onnx',
-  rec: 'https://cdn.jsdelivr.net/npm/@gutenye/ocr-models@1.4.2/assets/ch_PP-OCRv4_rec_infer.onnx',
-  dict: 'https://cdn.jsdelivr.net/npm/@gutenye/ocr-models@1.4.2/assets/ppocr_keys_v1.txt',
+  ort: ORT + 'ort.wasm.min.mjs', // CPU-only build: half the size of the default one, and the same speed here
+  wasmDir: ORT,
+  wasm: ORT + 'ort-wasm-simd-threaded.wasm',
+  det: MODELS + 'ch_PP-OCRv4_det_infer.onnx',
+  rec: MODELS + 'ch_PP-OCRv4_rec_infer.onnx',
+  dict: MODELS + 'ppocr_keys_v1.txt',
 };
+// Real sizes of the files. The CDN sends them compressed, and then Content-Length is the compressed size, so it
+// can't be used to size the download (that was the "offset is out of bounds" error). Used for progress only.
+const SIZE = { wasm: 14239897, det: 4745517, rec: 10822323 };
 let state = null, loading = null;
 
-async function fetchBuf(url, onProgress, share) {
-  const r = await fetch(url); if (!r.ok) throw new Error('Could not download the text reader (' + r.status + ').');
-  const len = +r.headers.get('content-length') || 0; if (!r.body || !len) return new Uint8Array(await r.arrayBuffer());
-  const rd = r.body.getReader(); const out = new Uint8Array(len); let got = 0;
-  for (;;) { const { done, value } = await rd.read(); if (done) break; out.set(value, got); got += value.length; onProgress && onProgress(share(got / len)); }
+async function fetchBuf(url, onBytes) {
+  let r;
+  try { r = await fetch(url); } catch (e) { throw new Error('Couldn’t download the text reader. Check the internet connection (it’s only needed the first time).'); }
+  if (!r.ok) throw new Error('Couldn’t download the text reader (error ' + r.status + ').');
+  if (!r.body) { const b = new Uint8Array(await r.arrayBuffer()); onBytes && onBytes(b.length); return b; }
+  const rd = r.body.getReader(); const parts = []; let got = 0;
+  for (;;) { const { done, value } = await rd.read(); if (done) break; parts.push(value); got += value.length; onBytes && onBytes(got); }
+  const out = new Uint8Array(got); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
   return out;
 }
-/** Load the models (once). onProgress(fraction, text). */
+const MB = (b) => (b / 1048576).toFixed(1);
+/** Load the engine and models (once). onProgress(fraction, text). */
 export async function load(onProgress) {
   if (state) return state; if (loading) return loading;
+  const say = (f, t) => onProgress && onProgress(f, t);
   loading = (async () => {
-    onProgress && onProgress(0, 'Getting the text reader ready (about 30 MB the first time)');
+    say(0, 'Getting the text reader ready');
     const ort = await import(PP.ort);
-    ort.env.wasm.wasmPaths = PP.wasm;
+    ort.env.wasm.wasmPaths = PP.wasmDir;
     ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 2) : 1;
-    let a = 0, b = 0; const tell = () => onProgress && onProgress(0.05 + 0.9 * (a * 0.3 + b * 0.7), 'Downloading the text reader');
-    const [detB, recB, dictT] = await Promise.all([
-      fetchBuf(PP.det, null, (f) => { a = f; tell(); }), fetchBuf(PP.rec, null, (f) => { b = f; tell(); }),
-      fetch(PP.dict).then((r) => r.text()),
+    const total = SIZE.wasm + SIZE.det + SIZE.rec; const got = { wasm: 0, det: 0, rec: 0 }; let last = 0;
+    const tell = (k) => (n) => { got[k] = n; const now = Date.now(); if (now - last < 150) return; last = now;
+      const g = got.wasm + got.det + got.rec; say(0.92 * Math.min(1, g / total), `Downloading the text reader: ${MB(g)} of ${MB(total)} MB (only the first time)`); };
+    const [wasmB, detB, recB, dictT] = await Promise.all([
+      fetchBuf(PP.wasm, tell('wasm')), fetchBuf(PP.det, tell('det')), fetchBuf(PP.rec, tell('rec')),
+      fetch(PP.dict).then((r) => { if (!r.ok) throw new Error('Couldn’t download the text reader (error ' + r.status + ').'); return r.text(); }),
     ]);
+    say(0.94, 'Starting the text reader');
+    ort.env.wasm.wasmBinary = wasmB.buffer;
     const opt = { executionProviders: ['wasm'], graphOptimizationLevel: 'all' };
     const det = await ort.InferenceSession.create(detB, opt);
     const rec = await ort.InferenceSession.create(recB, opt);
     const dict = dictT.split(/\r?\n/); if (dict[dict.length - 1] === '') dict.pop();
     state = { ort, det, rec, chars: ['', ...dict, ' '] };
-    onProgress && onProgress(1, 'Text reader ready');
+    say(1, 'Text reader ready');
     return state;
   })();
   try { return await loading; } finally { loading = null; }
