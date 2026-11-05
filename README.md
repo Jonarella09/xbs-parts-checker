@@ -1,34 +1,56 @@
-# XBS Parts Checker
+# The Indexer
 
-A web page for keeping track of printed **XBS Climber** pieces: count what you have, see how many complete sets that makes, and download exactly what's missing as numbered print plates.
+Count and index parts: screws, robot parts, field elements, 3D-printed kits. Everything runs in your browser. There's no account, no server and no AI service.
 
 **Open it:** https://jonarella09.github.io/xbs-parts-checker/
 
+Version 2.0 "Polaris" (phase 2 of the roadmap below).
+
 ## What it does
 
-- **Check pieces:** a photo of 291 printed pieces, each one marked and identified. Click any piece to compare it with a 3D picture of the part at the same scale.
-- **Inventory:** every one of the 24 parts with how many you have and how many complete sets that covers. One set is 60 pieces.
-- **Set builder:** go through a mixed pile one part at a time. It shows what each part looks like and how many one set needs. You count what you have, and it adds what's missing to your print list.
-- **Print:** fill the list for any number of complete sets, then split it into print plates for your bed: fewest plates, by set, same number of pieces, one part per plate, by size, or same total size. Combine small plates. Download one STL per piece, one STL per part, or a ready-arranged .3mf per plate, with every plate and piece numbered.
+- **Projects.** Each project has its own parts, counts, kits and photos. Create as many as you like. **XBS Climber parts** comes built in.
+- **Parts.** Add parts by hand (name, code, group, size, part number, pieces per package, weight), or from 3D models (.stl). A model gives the part a picture, exact sizes and print files.
+- **Inventory.** See every part with its count, change counts by hand, filter what you're short of, and reset everything to zero when the pieces get used up. Earlier photos move to History.
+- **Kits.** A kit is the list of parts, and how many of each, that build one of something. With a kit defined you see how many complete kits you have, what's missing for the next ones, and a shopping list. *Count part by part* walks you through a mixed pile one part at a time. Projects without a kit just count.
+- **Count from a photo.** Three modes:
+  - *Identify parts* matches every piece to a part in the project. Pieces it doesn't know are grouped by look, so you can name a whole group at once. Every correction teaches it.
+  - *Count one kind*: tap one screw and it counts every piece like it, including clumps it estimates by size.
+  - *Read package labels* reads part numbers, quantities and barcodes from packages laid on a table.
+- **Counting mat.** Print it at 100%. The four corner markers give exact sizes in millimetres (so an 8 mm and a 10 mm screw are told apart) and straighten photos taken at an angle.
+- **Print.** Fill the print list for any number of kits, split it into plates (fewest, by kit, same count, one part per plate, by size, same total size), combine small plates, and download one STL per piece, one STL per part, or an arranged .3mf per plate. Every file has a clear, numbered name.
+- **History.** Every photo (being checked, counted, archived) and every change to the counts.
 
-## Good to know
+## .star files
 
-- **Adding pieces from a photo is in beta and doesn't work reliably yet.** Counting by hand is reliable: use the Set builder, or type your counts in Inventory.
-- The page opens with my current inventory: the 291 pieces in the main photo (3 complete sets), my print list and my plate plan, plus a second photo that's still being checked.
-- Anything you change is saved in your own browser only. Nobody else sees it, it doesn't change the starting inventory, and it doesn't sync between devices.
+Projects are saved in the browser you use. **Save .star** writes the whole project (parts, models, photos, counts and history) to one file, so you can back it up or open it on another computer. In Chrome and Edge it keeps saving to the same file.
 
-## Files
+Install the app (Chrome or Edge: the install button in the address bar, or *Install The Indexer* on the home page) and it works offline. `.star` files then open in it when you double-click them, and they show a star icon.
 
-| File | What it is |
-| --- | --- |
-| `index.html` | The whole app |
-| `models.txt` | The 24 XBS Climber STL files, zipped and base64-encoded so GitHub Pages can serve them |
-| `photo2.jpg` | The main photo of printed pieces |
-| `added-photo-1.jpg` | A second photo, added with the beta photo tool |
-| `thumbs/` | Rendered pictures of each part |
+## How the photo counting works
+
+There's no cloud AI. It's classic computer vision running on your device:
+
+1. **Mat:** finds the ArUco markers, corrects the perspective and sets the scale in mm.
+2. **Background model:** learns the colour of the table or mat across the photo, including uneven light. A pixel counts as part of a piece when its colour differs from the table. Shadows are the same colour, only darker, so they're ignored (brightness/chromaticity distortion model).
+3. **Pieces:** cleans up the result, separates the pieces, and fills holes while remembering them (washers, nuts and gears have holes).
+4. **Touching pieces:** splits them with a distance-transform watershed. Clumps it can't split are estimated by area.
+5. **Measuring:** each piece gets its length, width, area, solidity, holes, width profile along its length (a screw head shows up here), outline harmonics (gear teeth, hex nuts) and colour.
+6. **Matching:** compares those measurements with each part's references. References come from pieces you confirmed, from the 3D model seen from above lying on each side, or from the size you typed. Without a mat, the scale is worked out from pieces that match parts of known size.
+
+Package labels are read with Tesseract (open-source OCR that runs in the browser; the first time it downloads about 15 MB). Barcodes use the browser's barcode reader, or ZXing where the browser doesn't have one.
+
+**For best results:** use a plain background in a colour the pieces don't share (metal on blue or green paper is ideal), spread the pieces so they don't touch, use even light from above, and put the counting mat in the photo.
+
+## Roadmap
+
+- **Phase 1 (done):** XBS Parts Checker. Counted the XBS Climber pieces from a photo, built print plates.
+- **Phase 2 (this version, 2.0 "Polaris"):** projects, .star files, any part with or without a model, kits, a general photo counter with learning, the counting mat and package labels.
+- **Phase 3:** read and write 3MF projects. Import one file with a whole arranged plate, have the page arrange models by size and options, and more export choices.
+- **Pre-phase 4:** research into other ways to count (weighing scales, pieces per gram, dispensers, trays with known slots, barcode bins, combinations) and full documentation of how the page works.
+- **Phase 4:** counting by weight. Weigh one piece, then weigh the pile.
+- **Later, to test:** optional in-browser AI models for cluttered backgrounds and look-alike parts. They'll only be added if they beat the measured approach on real photos.
 
 ## Credits
 
-The 3D models are **[XBS Climber](https://www.printables.com/model/1676140-xbs-climber/files)** by **[Experiential](https://www.printables.com/@Experiential_1229651)** ([@Experiential_1229651](https://www.printables.com/@Experiential_1229651)) on Printables. All credit for the design goes to them; check the model page for its license.
-
-This checker is an unofficial helper and isn't affiliated with the designer.
+- **XBS Climber 3D model:** [XBS Climber](https://www.printables.com/model/1676140-xbs-climber/files) by [Experiential](https://www.printables.com/@Experiential_1229651) (@Experiential_1229651) on Printables. All credit for the design goes to them; check the model page for its license. This tool is an unofficial helper.
+- **Libraries:** [js-aruco2](https://github.com/damianofalcioni/js-aruco2) (MIT), [Tesseract.js](https://github.com/naptha/tesseract.js) (Apache-2.0), [barcode-detector](https://github.com/Sec-ant/barcode-detector) with [zxing-wasm](https://github.com/Sec-ant/zxing-wasm) (MIT), [three.js](https://threejs.org) (MIT), [JSZip](https://stuk.github.io/jszip/) (MIT).

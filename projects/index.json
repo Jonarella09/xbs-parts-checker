@@ -1,0 +1,10 @@
+{
+ "projects": [
+  {
+   "id": "xbs-climber",
+   "name": "XBS Climber parts",
+   "file": "projects/xbs-climber.star",
+   "version": "2026-11-05"
+  }
+ ]
+}
