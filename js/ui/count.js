@@ -4,7 +4,7 @@ import { partById, sortedParts, photoById, photoSummary, tally, counts, diff, lo
 import { esc, pn, toast, confirmBox, promptBox, pickFiles, uid, clamp, PALETTE, inkOn, fmtN, when, openModal, closeModal } from '../util.js';
 import { thumbHTML, warmThumbs, pickPart, codeTag } from './common.js';
 import { openPartEditor, autoCode } from './part.js';
-import { decode, analyzeCanvas, canvasFromRGBA, toJpeg, thumbOf } from '../vision/client.js';
+import { decode, analyzeCanvas, canvasFromRGBA, toJpeg, thumbOf, call, pixels } from '../vision/client.js';
 import { refsFor, ensureSilhouettes, estimateScale, classify, group, similarTo, learn, feat, compact, letters } from '../vision/match.js';
 import { openMatDialog } from '../vision/mat.js';
 import { go, projPath } from '../main.js';
@@ -12,7 +12,7 @@ import { go, projPath } from '../main.js';
 const MODES = {
   parts: { t: 'Identify parts', icon: '◎', d: 'A mix of different parts. Each piece is matched to a part in this project. Pieces it doesn’t know are grouped so you can name them.' },
   quick: { t: 'Count one kind', icon: '#', d: 'A pile of the same thing: screws, washers, balls. Tap one, and it counts everything like it.' },
-  labels: { t: 'Read package labels', icon: 'Aa', d: 'Packages laid out on a table. It reads part numbers, quantities and barcodes from each one.' },
+  labels: { t: 'Read package labels', icon: 'Aa', d: 'Packages laid out on a table, labels up. It reads every label’s part number and pack size, and counts identical packages together.' },
 };
 const DEF = { shadow: null, minMM: 1.6, detail: 'normal', split: true };
 const S = { mode: 'parts', sel: -1, filter: null, s: 1, tx: 0, ty: 0, fit: 1, tool: null, measureA: null, img: null, imgFor: null, outlines: true, thr: 1.15 };
@@ -29,7 +29,7 @@ export async function mount(el, route, ctx) {
     const ph = r.sub[0] ? photoById(p, r.sub[0]) : null;
     if (r.sub[0] && !ph) { go(projPath('count')); return; }
     if (!ph) return startView(p);
-    if (ph.mode === 'labels') { const L = await import('./labels.js'); return L.labelsView(el, ph, { draw, back: () => go(projPath('count')) }); }
+    if (ph.mode === 'labels') { const L = await import('./labels.js'); return L.labelsView(el, ph); }
     return workspace(p, ph);
   }
 
@@ -81,6 +81,14 @@ export async function mount(el, route, ctx) {
     const pr = (f, t) => progress && progress(f, t);
     try {
       pr(0.02, 'Opening the photo');
+      if (mode === 'labels') {
+        // labels are read at full detail later (on the labels page); just keep the photo sharp
+        const { canvas: lc } = await decode(file, 16e6, 6000);
+        const id = uid('ph_'); const f2 = `photos/${id}.jpg`, th = `photos/${id}_t.jpg`;
+        await store.putFile(f2, await toJpeg(lc, 0.92)); await store.putFile(th, await thumbOf(lc));
+        store.change((q) => { q.photos.push({ id, name: `Photo ${p.photos.length + 1}`, file: f2, thumb: th, W: lc.width, H: lc.height, mode, status: 'draft', at: Date.now(), items: [], pkgs: null }); });
+        go(projPath('count', id)); return;
+      }
       const maxPx = st.detail === 'high' ? 12e6 : 7e6;
       let { canvas } = await decode(file, maxPx, st.detail === 'high' ? 5200 : 4200);
       if (mode !== 'labels' && p.parts.some((t) => t.model && !t.model.sil)) await ensureSilhouettes((f, t) => pr(0.03 + f * 0.1, t));
@@ -97,6 +105,8 @@ export async function mount(el, route, ctx) {
         go(projPath('count', id)); return;
       }
       ph.items = res.objs.map((o, k) => ({ id: 'i' + k, x: +o.x.toFixed(1), y: +o.y.toFixed(1), poly: thin(o.poly), box: o.box, f: compact(o), edge: o.edge || undefined }));
+      // a photo of labelled packages? offer to read the labels instead
+      try { const px = pixels(canvas); const fl = await call('findLabels', { rgba: px.data.buffer, W: px.width, H: px.height, opts: {} }, [px.data.buffer]); if (fl.labels.length >= 4) ph.labelHint = fl.labels.length; } catch (e) {}
       if (mode === 'parts') matchPhoto(p, ph); else ph.items.forEach((it) => { it.st = 'unknown'; it.part = null; });
       store.change((q) => { q.photos.push(ph); });
       go(projPath('count', id));
@@ -262,7 +272,7 @@ export async function mount(el, route, ctx) {
     const parts = sortedParts(p).filter((t) => byPart.has(t.id));
     const scale = ph.scaleSrc === 'mat' ? `<span class="scalepill ok" title="From the counting mat">Exact sizes · mat</span>` : ph.scaleSrc === 'manual' ? '<span class="scalepill ok">Scale set by hand</span>' : ph.scaleSrc === 'parts' ? `<span class="scalepill" title="Worked out from ${ph.scaleSupport || 'several'} pieces that matched parts of known size">Sizes estimated</span>` : ph.ppm ? '<span class="scalepill">Sizes known</span>' : '<span class="scalepill warn">No scale</span>';
     const selIt = S.sel >= 0 ? ph.items[S.sel] : null;
-    side.innerHTML = `
+    side.innerHTML = `${ph.labelHint && ph.status === 'draft' ? `<div class="note info" style="display:grid;gap:6px">This looks like ${ph.labelHint} labelled packages. Reading the labels counts them far better than looking at the pieces.<button type="button" class="btn small primary" id="toLabels" style="justify-self:start">Read the labels instead</button></div>` : ''}
       <div class="card"><div class="panel-h"><div class="grow" style="display:grid;gap:3px"><div class="row"><b>${esc(ph.name)}</b>${ph.status === 'added' ? '<span class="tag ok">Counted</span>' : ph.status === 'archived' ? '<span class="tag">Archived</span>' : '<span class="tag warn">Checking</span>'}</div><div class="row small muted">${scale}<span>${pn(s.objects, 'thing')} found</span></div></div>
         <button type="button" class="btn small ghost" id="phMore">More…</button></div></div>
       <div class="card grow-card"><div class="panel-h"><h3 class="grow">${pn(s.pieces, 'piece')}${s.unknown ? ` + ${s.unknown} unknown` : ''}</h3>${chk ? `<button type="button" class="btn small${S.filter === 'check' ? ' primary' : ''}" id="fChk">${chk} to check</button>` : ''}</div>
@@ -304,6 +314,7 @@ export async function mount(el, route, ctx) {
     if ($s('fChk')) $s('fChk').onclick = () => { S.filter = S.filter === 'check' ? null : 'check'; S.sel = -1; next(1); };
     side.querySelectorAll('[data-name]').forEach((b) => (b.onclick = () => nameGroup(ph, b.dataset.name)));
     $s('phMore').onclick = () => photoMenu(ph);
+    if ($s('toLabels')) $s('toLabels').onclick = () => { store.change((q) => { const P = photoById(q, ph.id); P.mode = 'labels'; P.items = []; P.pkgs = null; P.groups = []; delete P.labelHint; }); draw(); };
     if (it) {
       const set = (fn, log) => edit((q, P) => { const x = P.items[S.sel]; fn(x, q, P); }, log);
       if ($s('iOk')) $s('iOk').onclick = () => accept();
@@ -385,6 +396,7 @@ export async function mount(el, route, ctx) {
     if (ph.status !== 'archived') opts.push({ value: 'redetect', icon: '◎', label: 'Find pieces again', desc: 'Run detection again with the current settings. Your corrections on this photo are lost.' });
     if (ph.mode === 'parts' && ph.status !== 'archived') opts.push({ value: 'okAll', icon: '✓', label: 'Accept all sure guesses', desc: 'Mark every piece it is sure about as checked.' });
     if (ph.status === 'added') opts.push({ value: 'archive', icon: '⌂', label: 'Stop counting this photo', desc: 'Keep it in History without counting its pieces.' });
+    if (ph.status === 'draft') opts.push({ value: 'tolabels', icon: 'Aa', label: 'Read the labels on this photo instead', desc: 'For photos of packages: count them by their labels.' });
     opts.push({ value: 'history', icon: '↺', label: 'All photos (History)' });
     const a = await choiceBox({ title: esc(ph.name), options: opts }); if (!a) return;
     if (a === 'rename') { const n = await promptBox({ title: 'Rename photo', label: 'Name', value: ph.name }); if (n) edit((q, P) => { P.name = n; }, null); }
@@ -393,6 +405,7 @@ export async function mount(el, route, ctx) {
     if (a === 'archive') edit((q, P) => { P.status = 'archived'; P.archivedAt = Date.now(); P.archivedWhy = 'Stopped counting'; }, `Stopped counting ${ph.name}`);
     if (a === 'history') go(projPath('history'));
     if (a === 'redetect') redetect(ph);
+    if (a === 'tolabels') { store.change((q) => { const P = photoById(q, ph.id); P.mode = 'labels'; P.items = []; P.pkgs = null; P.groups = []; }); draw(); }
   }
   async function redetect(ph) {
     if (!(await confirmBox({ title: 'Find pieces again?', text: 'Detection runs again on this photo with the current settings. Corrections you made on it are lost.', ok: 'Find again' }))) return;

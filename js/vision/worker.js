@@ -11,7 +11,7 @@ let arucoReady = false;
 function loadAruco() { if (!arucoReady) { importScripts('../../lib/aruco/cv.js', '../../lib/aruco/aruco.js'); arucoReady = true; } }
 
 const CMDS = {
-  analyze, silhouettes,
+  analyze, silhouettes, findLabels,
   ping: () => ({ out: 'pong' }),
 };
 self.onmessage = async (e) => {
@@ -539,6 +539,45 @@ function rgb2lab(r, g, b) {
   let x = (R * 0.4124 + G * 0.3576 + B * 0.1805) / 0.95047, y = R * 0.2126 + G * 0.7152 + B * 0.0722, z = (R * 0.0193 + G * 0.1192 + B * 0.9505) / 1.08883;
   const h = (t) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116); x = h(x); y = h(y); z = h(z);
   return [Math.round((116 * y - 16) * 10) / 10, Math.round(500 * (x - y) * 10) / 10, Math.round(200 * (y - z) * 10) / 10];
+}
+
+/* ------------------------------------------------------------------ */
+/* package labels: white paper rectangles (with print on them) that stand out from bags and table */
+function findLabels(d, progress) {
+  const img = new Uint8ClampedArray(d.rgba); const W = d.W, H = d.H, N = W * H; const o = d.opts || {};
+  progress(0.1, 'Looking for labels');
+  // paper white: bright and colourless, judged against the brightest part of the photo
+  const lum = new Float32Array(N); const samp = [];
+  for (let p = 0, i = 0; p < N; p++, i += 4) { const r = img[i], g = img[i + 1], b = img[i + 2]; lum[p] = 0.299 * r + 0.587 * g + 0.114 * b; if ((p & 63) === 0) samp.push(lum[p]); }
+  samp.sort((a, b) => a - b); const p97 = samp[Math.floor(samp.length * 0.97)] || 230;
+  const tL = Math.max(140, Math.min(215, p97 - 42));
+  const m = new Uint8Array(N);
+  for (let p = 0, i = 0; p < N; p++, i += 4) { const r = img[i], g = img[i + 1], b = img[i + 2]; const ch = Math.max(r, g, b) - Math.min(r, g, b); if (lum[p] > tL && ch < 34 + (lum[p] - tL) * 0.15) m[p] = 1; }
+  let m2 = dilate(m, W, H, 2); m2 = erode(m2, W, H, 2);
+  // fill holes (the print: text and barcodes)
+  const inv = new Uint8Array(N); for (let p = 0; p < N; p++) inv[p] = m2[p] ? 0 : 1;
+  const ci = components(inv, W, H); const touch = new Uint8Array(ci.n + 1), area = new Int32Array(ci.n + 1);
+  for (let p = 0; p < N; p++) { const l = ci.lab[p]; if (!l) continue; area[l]++; const x = p % W, y = (p / W) | 0; if (x === 0 || y === 0 || x === W - 1 || y === H - 1) touch[l] = 1; }
+  const maxHole = N * 0.004; for (let p = 0; p < N; p++) { const l = ci.lab[p]; if (l && !touch[l] && area[l] < maxHole) m2[p] = 1; }
+  progress(0.5, 'Separating labels');
+  // a big opening removes thin glare on bags and keeps the solid paper rectangles
+  const k = Math.max(4, Math.round(Math.min(W, H) * (o.open || 0.011)));
+  let op = erode(m2, W, H, k); op = dilate(op, W, H, k);
+  const cc = components(op, W, H); const st = compStats(cc.lab, cc.n, W, H);
+  const minA = Math.max(400, N * (o.minFrac || 0.0006)), maxA = N * 0.06; const out = [];
+  for (const c of st) {
+    if (c.a < minA || c.a > maxA) continue;
+    const loc = local(cc.lab, W, c); const cont = trace(loc.own, loc.w, loc.h); if (cont.length < 8) continue;
+    const hull = convexHull(cont); const r = minRect(hull); const fill = c.a / (r.L * r.W);
+    if (fill < 0.6 || r.W < 12) continue;
+    // centre of the rectangle in photo coordinates
+    let sx = 0, sy = 0; for (const [x, y] of hull) { sx += x; sy += y; } const ca = Math.cos(r.ang), sa = Math.sin(r.ang);
+    let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity; for (const [x, y] of hull) { const u = x * ca + y * sa, v = -x * sa + y * ca; if (u < u0) u0 = u; if (u > u1) u1 = u; if (v < v0) v0 = v; if (v > v1) v1 = v; }
+    const um = (u0 + u1) / 2, vm = (v0 + v1) / 2; let ang = r.ang; while (ang > Math.PI / 2) ang -= Math.PI; while (ang < -Math.PI / 2) ang += Math.PI;
+    out.push({ cx: c.x0 + um * ca - vm * sa, cy: c.y0 + um * sa + vm * ca, w: r.L, h: r.W, ang, fill: +fill.toFixed(2), box: [c.x0, c.y0, c.x1 + 1, c.y1 + 1], a: c.a });
+  }
+  progress(1, 'Done');
+  return { out: { labels: out, tL: Math.round(tL), k } };
 }
 
 /* ------------------------------------------------------------------ */
